@@ -1,0 +1,640 @@
+---
+title: "Subedi Final Project"
+subtitle: "Amisha"
+output:
+  html_document: default
+  pdf_document: default
+date: "2023-11-16"
+---
+
+```{r setup, echo = FALSE, include = FALSE, message = FALSE, warning = FALSE, results='asis'}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message = FALSE, results="asis")
+auto_set_format <- function() { 
+   if (knitr::is_latex_output()) { 
+     return("latex") 
+   } else { 
+     return("html") 
+   } 
+}
+
+# Set table format based on the output type
+table_format <- auto_set_format()
+```
+
+```{r load-libraries, include = FALSE, message = FALSE, warning = FALSE}
+pacman::p_load(tidyverse, readr, stringr, dplyr, usmap, sf, leaflet, rnaturalearth,
+               gridExtra, leaflet, leaflet.extras, ggrepel, kableExtra, knitr)
+
+```
+
+## Introduction
+
+In our team's comprehensive exploration of crime and transportation dynamics, my specific focus centers on Washington D.C., a city known for its intricate urban challenges. As we collectively delve into the nuanced interplay between crime incidents and transportation infrastructure in the United States, this individual inquiry homes in on the nation's capital. The primary objective is to unravel distinct patterns or correlations within the local landscape, with a particular emphasis on examining how crime rates relate to the presence of metro bus stops. By incorporating demographic factors and counties characteristics, this investigation aims to shed light on the multifaceted dynamics of crime and transportation in Washington D.C. 
+
+
+## Question 1
+
+## How are crime incidents and metro stations presence distributed across Washington D.C.'s neighborhood clusters, and what insights can be drawn from their spatial relationship?
+
+
+```{r load-dataframe}
+# Read in the data
+dc_crime <- read_csv('data/dc-crimes-search-results.csv')
+dc_demography <- read_csv('data/dc_demography.csv')
+
+```
+
+```{r crime-datawrangling}
+# data wrangling for dc crime
+dc_crime <- dc_crime %>%
+  select(-CENSUS_TRACT, -YBLOCK, -offensekey, -BID, -PSA, -`ucr-rank`,
+         -BLOCK_GROUP, -VOTING_PRECINCT, -XBLOCK, -BLOCK, -START_DATE,
+         -CCN, -OFFENSE, -OCTO_RECORD_ID, -ANC, -REPORT_DAT, -METHOD, -location) %>%
+  rename(lat = LATITUDE, long = LONGITUDE, date = END_DATE, offense = `offense-text`, Cluster_Id = NEIGHBORHOOD_CLUSTER)
+```
+
+```{r demography-datawrangling}
+# data wrangling : Demography
+dc_demography <- dc_demography %>%
+  rename(
+    Cluster_Id = original_id,
+    counties = name,
+    Total_Population = p0010001_2020,
+    White = p0010003_2020,
+    Black = p0010004_2020,
+    Native = p0010005_2020,
+    Asian = p0010006_2020,
+    Hispanic = p0010008_2020
+  ) %>%
+  select(Cluster_Id, counties, Total_Population, White, Black, Native, Asian, Hispanic) %>%
+  mutate(
+    Cluster_Id = tolower(Cluster_Id)
+  )
+```
+
+```{r data-join}
+# join data
+population <- dc_demography %>%
+  group_by(Cluster_Id) %>%
+  select(Total_Population)
+
+dc_crime_demography <- dc_crime %>%
+  left_join(dc_demography, by = "Cluster_Id")
+```
+
+
+```{r load-geojson, results='hide'}
+# Load geo-json data for neighborhood cluster in DC to get spatial boundaries of neighborhood clusters
+neighborhood_url <- 'https://raw.githubusercontent.com/benbalter/dc-maps/master/maps/neighborhood-clusters.geojson'
+dc_neighborhood <- st_read(neighborhood_url) %>%
+  rename(
+    Cluster_Id = NAME,
+    counties = NBH_NAMES
+  ) %>%
+  mutate(
+    Cluster_Id = tolower(Cluster_Id)
+  )
+```
+
+
+Before we delve into the spatial analysis of crime incidents across Washington D.C.'s counties, it is pertinent to understand the composition of the Washington DC. DC is divided into smaller areas called "clusters" - compromising two or more areas called "neighborhoods", which I will interchangeably use as "counties" in this report. These clusters are groupings of counties that share similar characteristics and are crucial for our analysis as they form the basis of our geographic segmentation. Below is a table listing a random selection of these clusters alongside the corresponding counties they comprise. This will provide a reference point as we proceed to the choropleth map visualization, which illustrates the distribution of crime incidents across these clusters.
+
+
+```{r dc_clusters_counties}
+# Randomly select 10 unique clusters
+random_clusters <- dc_demography %>%
+  distinct(Cluster_Id, .keep_all = TRUE) %>%
+  sample_n(10)
+
+# Create a summary table with cluster IDs and their corresponding counties
+cluster_summary <- dc_neighborhood %>%
+  st_set_geometry(NULL) %>% 
+  filter(Cluster_Id %in% random_clusters$Cluster_Id) %>%
+  group_by(Cluster_Id) %>%
+  summarise(counties = toString(unique(counties))) %>%
+  ungroup()
+
+# Create the table with kable
+cluster_table <- cluster_summary %>%
+  kable(format = table_format, caption = "Random Selection of 10 Clusters and Their Corresponding Counties") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F, latex_options = "HOLD_position")
+
+cluster_table
+
+```
+
+
+Now, I will begin my analysis by generating a detailed choropleth map to visualize the distribution of crime incidents across the various neighborhood clusters in Washington D.C. I initiate the inquiry with a choropleth map to visualize crime distribution across Washington D.C.'s 46 neighborhood clusters—simplified groupings from the original 131 counties. This initial step is crucial in understanding the landscape of urban crime before delving into the interplay with metro station presence. To ensure accuracy and relevance, my focus is specifically on types of crime incidents related to urban settings. Using a comprehensive dataset that includes crime locations and types, I was able to categorize and analyze these incidents effectively. This analysis is not just about pinpointing hotspots but understanding the broader patterns of crime distribution in relation to the city's fabric. This initial analysis seeks to highlight areas with higher crime rates and to set the stage for a deeper exploration into urban dynamics. The choropleth map below serves as a visualization tool to delineate the crime frequency by neighborhood, revealing patterns that may not be immediately apparent through raw data alone.
+
+
+```{r crime-map}
+# Calculate crime rate for every 1000 residents
+crime_by_neighborhood <- dc_crime_demography %>%
+  group_by(counties) %>%
+  summarise(crime_count = n(), Total_Population = unique(Total_Population)) %>%
+  mutate(crime_rate = as.numeric(sprintf("%.2f", (crime_count / Total_Population) * 1000))) %>%
+  ungroup()
+
+# Merging crime data with neighborhood spatial data
+neighbor_crime_map <- merge(dc_neighborhood, crime_by_neighborhood, by.x = "counties", by.y = "counties", all.x = TRUE)
+  
+# Calculate centroids for each cluster
+centroid <- neighbor_crime_map %>%
+  group_by(Cluster_Id) %>%
+  summarize(geometry = st_centroid(st_union(geometry))) %>%
+  ungroup()
+
+# Add x and y coordinates for text placement
+centroid$x <- st_coordinates(centroid$geometry)[,1]
+centroid$y <- st_coordinates(centroid$geometry)[,2]
+
+# Plot the map with centroid labels
+crime_neighborhood_map <- ggplot(data = neighbor_crime_map) +
+  geom_sf(aes(fill = crime_rate), color = "white") +
+  coord_sf() +
+  scale_fill_distiller(palette = "Blues", trans = "reverse") +
+  labs(title = "Crime Rate by Neighborhood Clusters", 
+       subtitle = "Crime Rate per 1000 Residents",
+       fill = "Crime Rate") +
+  theme_void() +
+  theme(legend.position = "right") +
+  geom_text(data = centroid, aes(x = x, y = y, label = gsub("cluster ", "", Cluster_Id)), color = "black", size = 3)
+
+print(crime_neighborhood_map)
+```
+
+
+The choropleth map above illustrates the distribution of crime rates across Washington D.C.'s neighborhoods. Notably, central neighborhoods like Cluster 3 (Howard University, Le Droit Park), Cluster 22 (Brookland, Brentwood, Langdon) exhibit elevated crime rates, suggesting a potential link between urban density and crime incidence. This pattern underscores the need for targeted law enforcement and community resources in these areas.
+
+Following the crime rate examination, I turn my attention to the presence of metro stations. By plotting a second choropleth map that represents the number of metro bus stops per 1,000 residents (which I'll refer by "Transport Rate" in this report) by neighborhood, we can overlay our understanding of crime distribution with public transportation accessibility. This comparison allows us to identify any apparent relationships between crime incidence and the density of metro services, thus providing insights into how transit infrastructure might influence neighborhood safety.
+
+
+```{r metro-data}
+# Loading and Preparing Metro Stations Data
+metro_stations <- read_csv('data/Metro_Bus_Stops.csv')
+metro_stations_sf <- st_as_sf(metro_stations, coords = c("X", "Y"))
+st_crs(metro_stations_sf) <- st_crs(dc_neighborhood)
+
+metro_stations_with_neighborhood <- st_join(metro_stations_sf, dc_neighborhood)
+
+metro_bus_stops <- metro_stations_with_neighborhood %>%
+  left_join(population, by = "Cluster_Id")
+
+```
+
+
+```{r metro-map}
+# Summarize metro station counts by neighborhood
+metro_by_neighborhood <- metro_bus_stops %>%
+  group_by(counties) %>%
+  summarise(transport_count = n(), Total_Population = unique(Total_Population)) %>%
+  mutate(transport_rate = as.numeric(sprintf("%.2f", (transport_count / Total_Population) *
+                                               1000))) %>%
+  ungroup()
+
+# Merging metro station data with neighborhood boundaries
+neighbor_metro_map <- st_join(dc_neighborhood, metro_by_neighborhood)
+
+# Creating a choropleth map of metro station counts by neighborhood
+neighborhood_metro_map <- ggplot(data = neighbor_metro_map) +
+  geom_sf(aes(fill = transport_rate), color = "white") +
+  coord_sf() +
+  scale_fill_distiller(palette = "Blues", trans = "reverse") +
+  labs(title = "Transport Rate by Neighborhood Clusters",
+       subtitle = "Transport Rate per 1000 Residents",
+       fill = "Transport Rate") +
+  theme_void() +
+  theme(legend.position = "right") +
+  geom_text(data = centroid, aes(x = x, y = y, label = gsub("cluster ", "", Cluster_Id)), color = "black", size = 3)
+
+print(neighborhood_metro_map)
+```
+
+
+Upon analysis of the second map, the distribution is more darker on cluster 16, 35, 20, 22, and 8.
+To synthesize our findings, we utilize the grid arrange function to present a side-by-side comparison of crime and metro station distribution. This combined visual representation facilitates a comprehensive analysis of the potential interplay between these two critical urban factors. It provides a clearer narrative of how transit infrastructure may correlate with safety and security across neighborhoods.
+
+
+```{r grid-arrange}
+# Combining Crime and Metro Maps for Comparative Visualization
+grid.arrange(crime_neighborhood_map, neighborhood_metro_map, nrow = 2)
+```
+
+
+The combined visualization raises intriguing considerations; while some areas (Clusters 22, 8, 20) with high metro rates align with increased crime rates, others (cluster 16, 13, 10) do not follow this pattern, suggesting the influence of additional, unexplored variables. Given the complexity of discerning clear patterns from static choropleth maps, I have employed an interactive Leaflet map for a more nuanced exploration of the spatial relationship between crime rates and transport rates in Washington D.C.'s neighborhoods. 
+
+In this interactive map, you can zoom out to view polygons representing crime rates in specific neighborhood clusters. Additionally, metro station locations are marked on the map for reference. When zoomed out, you may notice that markers are clustered together for a more organized presentation. This clustering allows for a clearer overview of the entire city, and as you zoom in, markers expand to provide finer details. The interactive map provides a dynamic and user-friendly way to explore the data, allowing for a more in-depth analysis of the urban dynamics in relation to crime and transportation accessibility.
+
+
+```{r leaflet-map}
+# Define the latitude and longitude boundaries for Washington D.C.
+dc_lat_min <- 38.79163
+dc_lat_max <- 38.99598
+dc_long_min <- -77.11976
+dc_long_max <- -76.90940
+
+metro_location <- metro_stations %>%
+  select(lat = Y, long = X, station_name = BSTP_MSG_TEXT, WARD_ID) %>%
+  filter(!is.na(lat) & !is.na(long)) %>%
+  filter(lat >= dc_lat_min & lat <= dc_lat_max & long >= dc_long_min & long <= dc_long_max)
+
+# Consolidate bus stops with the same name
+unique_bus_stops <- metro_location %>%
+  distinct(station_name, .keep_all = TRUE)
+
+# Custom icon for metro stations
+metro_icon <- makeIcon(
+  iconUrl = "https://icons.veryicon.com/png/o/miscellaneous/geographic-information-mapping-icon-library/metro-station-2.png", 
+  iconWidth = 25, iconHeight = 41,
+  iconAnchorX = 12, iconAnchorY = 41
+)
+
+# Create the Leaflet map with marker clustering and custom icons
+leaflet_map <- leaflet() %>%
+  addTiles() %>% 
+  setView(lng = -77.0369, lat = 38.9072, zoom = 15) %>%
+  addPolygons(data = neighbor_crime_map, 
+              fillColor = ~colorQuantile("YlOrRd", crime_rate)(crime_rate),
+              weight = 1,
+              color = "#2b2b2b",
+              fillOpacity = 0.7,
+              popup = ~sprintf("Cluster: %s<br>Counties: %s<br>Crime Rate: %.2f%%", Cluster_Id, counties, crime_rate)) %>%
+  addMarkers( data = unique_bus_stops,
+    lng = ~long, lat = ~lat,
+    icon = metro_icon,
+    popup = ~paste(station_name),
+    clusterOptions = markerClusterOptions(maxClusterRadius = 40)
+  )
+
+leaflet_map
+
+```
+
+
+From the Leaflet visualization, it is evident that such as Cluster 25 (Union Station, Stanton Parkm and Kingman Park), Cluster 23 (Ivy City, Arboretum, Trinidad, Carver Lang), Cluster 8 (Downtown, Chinatown, Penn Quarters)  which encompasses parts of Northeast and Southeast D.C., display a higher concentration of metro bus stops along with the most intense red shading, indicating the highest crime rates. In contrast, Cluster 9 - Southwest Waterfront, which includes the National Mall and surrounding areas, shows moderate transportation clustering with a notably lower crime rate, as suggested by the lighter coloration. Furthermore, Cluster 38 (Douglas, Shipley Terrace),despite having a dense transit network, do not exhibit the darkest shades, suggesting that factors other than transportation availability might play a role in influencing crime rates. This interactive mapping approach reveals the spatial nuances and complexities within Washington D.C., challenging simple correlations and highlighting the multifaceted nature of urban crime dynamics
+
+
+## Question 2
+## What patterns emerge for robberies and other offenses around transportation hubs, and which crimes are most strongly correlated with these locations?
+
+I was interested in discovering whether neighborhoods with extensive transportation facilities experienced a disproportionately higher rate of robberies compared to those with fewer transit options. The key term here is 'disproportionately' because my objective was not to simply identify if robberies occur but to ascertain if they occur at a rate that outpaces what might be expected given the neighborhood population. Such an understanding is vital; without it, one might mistakenly attribute a city-wide rise in robbery rates solely to increased transportation options, overlooking other socio-economic factors that influence crime.
+
+To this end, I analyzed robbery rates on a per capita basis, juxtaposing them with transportation rates within the same neighborhoods. This per capita approach ensures a consistent comparison, mitigating the risk of skewed perceptions that could arise from raw data comparisons.
+
+
+```{r robbery-metro}
+# calculate robbery by neighborhood info
+robbery_by_neighborhood <- dc_crime_demography %>%
+  filter(offense == "robbery") %>%
+  group_by(counties) %>%
+  summarise(robbery_rate = n() / Total_Population * 1000)
+
+# Merge the crime and metro data by neighborhood
+neighborhood_data <- left_join(robbery_by_neighborhood, metro_by_neighborhood, by = "counties")
+
+# Truncate the neighborhood names to the first word for the labels
+neighborhood_data <- neighborhood_data %>%
+  mutate(short_name = word(counties, 2))
+
+
+ggplot(neighborhood_data, aes(x = transport_rate, y = robbery_rate, label = short_name)) +
+  geom_point(aes(color = as.factor(counties)), size = 3, alpha = 0.6) +
+  geom_text(aes(label = short_name), size = 2.5, vjust = "inward", hjust = "inward") +
+  geom_smooth(method = "lm", color = "black", se = FALSE) +
+  scale_y_continuous(limits = c(0, 15), oob = scales::rescale_none) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    legend.position = "none"
+  ) +
+  labs(
+    title = "Relationship between Crime Rate and Transportation Rate by Neighborhood Cluster",
+    x = "Transportation Rate per Capita",
+    y = "Robbery Rate per Capita"
+  )
+```
+
+
+In examining the scatter plot, my hypothesis was that neighborhood clusters with higher per capita transportation rates would exhibit increased robbery rates. However, the visualization unveiled a nuanced reality. The spread of data points across the scatterplot, along with the best-fit line, indicated a moderate positive correlation overall. The correlation coefficient was approximately 0.25. Yet, this wasn't universal; some neighborhoods with dense transportation networks did not see a corresponding spike in robbery rates, hinting at a more complex interplay of factors at work.
+
+Building upon the initial analysis of robbery rates, I extended my investigation to encompass a wider array of crimes. My interest was to discern whether other offenses—like assault, theft, and motor vehicle theft—exhibited a similar or divergent pattern when considering their proximity to transportation hubs.
+
+
+```{r all-crimes}
+# I am interested to see all types of crime and their relationship
+crime_types <- c("motor vehicle theft", "theft f/auto", "robbery",
+                 "assault w/dangerous weapon", "burglary", "homicide",
+                 "sex abuse", "arson")
+
+# Create a summarized data frame for each crime type
+crime_data <- dc_crime_demography %>%
+  filter(offense %in% crime_types) %>%
+  mutate(offense = ifelse(offense == "theft f/auto", "theft/other", offense)) %>%
+  group_by(counties, offense) %>%
+  summarise(crime_count = n(), Total_Population = unique(Total_Population)) %>%
+  mutate(crime_rate = (crime_count / Total_Population) * 1000) %>%
+  ungroup()
+
+# Merge with transportation hub data
+neighborhood_data_by_crime <- left_join(crime_data, metro_by_neighborhood, by = "counties")
+
+# Calculate correlation coefficients for each crime type
+correlation_data <- neighborhood_data_by_crime %>%
+  group_by(offense) %>%
+  summarize(correlation = cor(transport_rate, crime_rate, use = "complete.obs")) %>%
+  ungroup()
+
+# Merge with the main data frame
+neighborhood_data_by_crime <- left_join(neighborhood_data_by_crime, correlation_data, by = "offense")
+
+# Create the plot
+ggplot(neighborhood_data_by_crime, aes(x = transport_rate, y = crime_rate, label = counties)) +
+  geom_point(aes(color = offense), size = 3, alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  facet_wrap(~offense, scales = "free_y") +
+  scale_x_log10(labels = scales::comma) +
+  geom_text(data = correlation_data, aes(label = paste("r =", round(correlation, 2)), 
+                                         x = Inf, y = Inf),
+            position = position_nudge(y = 1),
+            hjust = 1, vjust = 1, size = 3.5, color = "red", show.legend = FALSE) +
+  theme_minimal() +
+  labs(
+    title = "Correlation between Crime Types and Metro Bus Stops by Neighborhood Cluster",
+    x = "Number of Transportation Facilities",
+    y = "Crime Rate"
+  ) +
+  theme(
+    legend.position = "none",
+    strip.text.x = element_text(size = 10, face = "bold")
+  )
+
+```
+
+
+The analysis of crime types in relation to metro bus stop density in Washington D.C. neighborhoods reveals varying correlations. Arson shows a strong positive link, suggesting increased fire risk in areas with more transit facilities. Assault and burglary exhibit moderate associations, while homicide and motor vehicle theft are also positively correlated. Sex abuse demonstrates a significant connection, emphasizing the need for enhanced safety measures. However, theft and other offenses have a weaker relationship with metro bus stops. These findings highlight the nuanced impact of transportation accessibility on different crime types, calling for tailored approaches to urban safety planning.
+
+
+## Question 3
+## What are the observed patterns in racial demographics related to crime types across top 10 neighborhoods with highest violent and property crime, and What might be the underlying reasons for these patterns?
+
+In our pursuit to understand the social underpinnings of crime within Washington D.C.'s varied landscape, Question 3 led us to an investigative analysis of the demographic composition within the neighborhood clusters most affected by crime. I was particularly interested in discerning whether the demographic profiles of these areas show any patterns. This curiosity was rooted in the hypothesis that certain socio-demographic characteristics might predispose neighborhoods to higher incidences of violent and property crimes. The subsequent findings reveal not just cold numbers but stories of communities, each with its unique socio-economic tapestry that potentially influences its crime narrative. To bring these stories to light, the ensuing sections will present tables and scatter plots that map out the demographic breakdowns against crime rates. These visual narratives are not merely illustrative but are integral to sculpting targeted, data-informed strategies for urban policy and community revitalization.
+
+
+```{r crime-demography}
+# combine dc crime with demography
+dc_crime_demography <- dc_crime_demography %>%
+  mutate(
+    Others = Total_Population - (White + Black + Native + Asian + Hispanic)
+  )
+
+# convert the data frame to long
+dc_crime_demography_long <- dc_crime_demography %>%
+  pivot_longer(
+    cols = c(White, Black, Native, Asian, Hispanic, Others),
+    names_to = "Race",
+    values_to = "Population_Count"
+  )
+
+dc_crime_demography_long <- dc_crime_demography_long%>%
+  left_join(crime_by_neighborhood, by = "counties")
+
+```
+
+
+Before delving into the analysis of the top 10 and bottom 10 clusters for violent crime rates in Washington DC, it is important to note that certain clusters, specifically clusters 42, 45, and 46, 43 are not included in this and similar analyses. Cluster 42, consisting mainly of the U.S. Naval Observatory and Embassy Row, Cluster 45, encompassing the National Mall with its museums and cultural institutions, and Cluster 46, home to the U.S. National Arboretum, are all primarily non-residential areas. These characteristics render them less relevant for residential population-focused analyses such as crime rate studies.
+
+
+```{r violent-top10-bottom10}
+# violent crime rate per clusters
+violent_rate_per_cluster <- dc_crime_demography_long %>%
+  filter(offensegroup == "violent", !Cluster_Id %in% c("cluster 42", "cluster 45", "cluster 46", "cluster 43")) %>%
+  group_by(Cluster_Id) %>%
+  summarise(violent_count = n(), Total_Population = unique(Total_Population.x)) %>%
+  mutate(violent_rate = (violent_count / Total_Population) * 1000)
+
+# top 10 cluster with highest violent crime rate
+top_10_clusters <- violent_rate_per_cluster %>%
+  arrange(desc(violent_rate)) %>%
+  slice_head(n = 10)
+
+# bottom 10 with lowest violent crime rate
+bottom_10_clusters <- violent_rate_per_cluster %>%
+  arrange(violent_rate) %>%
+  slice_head(n = 10)
+
+# Create ggplot for Top 10 Clusters
+top_10_plot <- ggplot(top_10_clusters, aes(x = reorder(Cluster_Id, violent_rate), y = violent_rate, fill = Cluster_Id)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top 10 Clusters",
+       subtitle = "Violent Crime Rate",
+       x = "Cluster ID",
+       y = "Violent Crime Rate per 1000 Residents") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set3")
+
+# Create ggplot for Bottom 10 Clusters
+bottom_10_plot <- ggplot(bottom_10_clusters, aes(x = reorder(Cluster_Id, violent_rate), y = violent_rate, fill = Cluster_Id)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Bottom 10 Clusters",
+       subtitle = "Violent Crime Rate",
+       x = "Cluster ID",
+       y = "Violent Crime Rate per 1000 Residents") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set3")
+
+# grid arrange to compare both
+grid.arrange(top_10_plot, bottom_10_plot, ncol = 2)
+
+```
+
+
+The bar charts depict the top and bottom 10 clusters in Washington D.C. by violent crime rate per 1000 residents, with clusters 43 and 4 experiencing the highest and lowest rates respectively. To further understand the underlying factors, analyzing the demographic composition of the top 10 and bottom 10 clusters could provide valuable insights into the correlation between crime rates and demographic variables.
+
+
+```{r violent-demographics}
+
+# Aggregate population data
+total_population <- dc_crime_demography_long %>%
+  group_by(Cluster_Id) %>%
+  summarise(Total_Pop = sum(Population_Count))
+
+# Calculate percentage for top 5
+top_10_percent <- dc_crime_demography_long %>%
+  filter(Cluster_Id %in% top_10_clusters$Cluster_Id) %>%
+  group_by(Cluster_Id, Race) %>%
+  summarise(Demo_Pop = sum(Population_Count)) %>%
+  left_join(total_population, by = "Cluster_Id") %>%
+  mutate(Percentage = (Demo_Pop / Total_Pop) * 100)
+
+# Repeat for bottom 5
+bottom_10_percent <- dc_crime_demography_long %>%
+  filter(Cluster_Id %in% bottom_10_clusters$Cluster_Id) %>%
+  group_by(Cluster_Id, Race) %>%
+  summarise(Demo_Pop = sum(Population_Count)) %>%
+  left_join(total_population, by = "Cluster_Id") %>%
+  mutate(Percentage = (Demo_Pop / Total_Pop) * 100)
+
+# Plotting for top 5
+top_10_plot <- ggplot(top_10_percent, aes(x = reorder(Race, Percentage), y = Percentage, fill = Race)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = sprintf("%.1f%%", Percentage)), vjust = -0.5, size = 2) + 
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Cluster_Id) +
+  labs(title = "Top 10 Clusters: Demographic Percentage", x = "Race", y = "Percentage") 
+
+# Plotting for bottom 5
+bottom_10_plot <- ggplot(bottom_10_percent, aes(x = reorder(Race, Percentage), y = Percentage, fill = Race)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = sprintf("%.1f%%", Percentage)), vjust = -0.5, size = 2) +  
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle = 90, hjust = 1)) +
+  facet_wrap(~Cluster_Id) +
+  labs(title = "Bottom 10 Clusters: Demographic Percentage", x = "Race", y = "Percentage") 
+
+top_10_plot
+bottom_10_plot
+
+
+```
+
+
+Analyzing the demographic composition in the top 10 clusters with the highest violent crime rates reveals disparities. Notably, the Black demographic is more prevalent in all clusters, while cluster 3 shows a significant White demographic presence. In contrast, the bottom 10 clusters have a distinct demographic profile, with the White demographic being more prominent all clusters, except for cluster 16. These observations suggest potential correlations between demographic variables and crime rates, which warrant further investigation. 
+
+Now, I'm curious to explore if similar demographic patterns exist for property crime rates. Let's delve into the demographic composition of property crime to understand if specific demographics have consistent impacts on both violent and property crime in different clusters. 
+
+
+```{r property-top10-bottom10}
+# Property crime rate per clusters
+property_rate_per_cluster <- dc_crime_demography_long %>%
+  filter(offensegroup == "property", !Cluster_Id %in% c("cluster 42", "cluster 45", "cluster 46", "cluster 43")) %>%
+  group_by(Cluster_Id) %>%
+  summarise(property_count = n(), Total_Population = unique(Total_Population.x)) %>%
+  mutate(property_rate = (property_count / Total_Population) * 1000)
+
+# Top 10 clusters with highest property crime rate
+top_10_property_clusters <- property_rate_per_cluster %>%
+  arrange(desc(property_rate)) %>%
+  slice_head(n = 10)
+
+# Bottom 10 clusters with lowest property crime rate
+bottom_10_property_clusters <- property_rate_per_cluster %>%
+  arrange(property_rate) %>%
+  slice_head(n = 10)
+
+# Create ggplot for Top 10 Property Crime Clusters
+top_10_property_plot <- ggplot(top_10_property_clusters, aes(x = reorder(Cluster_Id, property_rate), y = property_rate, fill = Cluster_Id)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top 10 Clusters",
+       subtitle = "Property Crime Rate",
+       x = "Cluster ID",
+       y = "Property Crime Rate per 1000 Residents") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set3")
+
+# Create ggplot for Bottom 10 Property Crime Clusters
+bottom_10_property_plot <- ggplot(bottom_10_property_clusters, aes(x = reorder(Cluster_Id, property_rate), y = property_rate, fill = Cluster_Id)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Bottom 10 Clusters",
+       subtitle = "Property Crime Rate",
+       x = "Cluster ID",
+       y = "Property Crime Rate per 1000 Residents") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set3")
+
+# Grid arrange to compare both
+grid.arrange(top_10_property_plot, bottom_10_property_plot, ncol = 2)
+ 
+```
+
+
+The property crime rate bar charts for Washington D.C. reveal a stark disparity, with cluster 40 standing out for its notably high rate. This contrast to the much lower rates in the bottom clusters is striking and suggests a complex interplay of factors at play. It raises the question of whether demographic patterns observed in violent crime rates similarly influence property crime or if these rates are shaped by different dynamics altogether. So, I want to study the demographics of the top 10 and bottom 10 neighborhood clusters to see if their demographics follow any pattern.
+
+I have utilized kableExtra to list the demographic details of top 10 and bottom 10 Neighborhoods below:
+
+
+```{r property-demographics}
+# Calculate the total population for each cluster
+total_population <- dc_crime_demography_long %>%
+  group_by(Cluster_Id) %>%
+  summarise(Total_Pop = sum(Population_Count))
+
+# Filter the dataset for only the top 10 clusters and calculate the demographic percentage
+top_10_percent <- dc_crime_demography_long %>%
+  filter(Cluster_Id %in% top_10_property_clusters$Cluster_Id) %>%
+  group_by(Cluster_Id, counties, Race) %>%
+  summarise(Demo_Pop = sum(Population_Count)) %>%
+  left_join(total_population, by = "Cluster_Id") %>%
+  mutate(Percentage = (Demo_Pop / Total_Pop) * 100)
+
+# Prepare the top 10 data for display, removing population counts and pivoting races into columns
+top_10_percent <- top_10_percent %>%
+  select(-Demo_Pop, -Total_Pop) %>%
+  pivot_wider(names_from = Race, values_from = Percentage) %>%
+  mutate(Asian = sprintf("%.2f", Asian)) %>%
+  mutate(across(-1, ~sprintf("%.2f", .)))
+
+
+# Repeat the same percentage calculation process for the bottom 10 clusters
+bottom_10_percent <- dc_crime_demography_long %>%
+  filter(Cluster_Id %in% bottom_10_property_clusters$Cluster_Id) %>%
+  group_by(Cluster_Id, counties, Race) %>%
+  summarise(Demo_Pop = sum(Population_Count)) %>%
+  left_join(total_population, by = "Cluster_Id") %>%
+  mutate(Percentage = (Demo_Pop / Total_Pop) * 100)
+
+# Prepare the bottom 5 data for display, similar to the top 10 clusters
+bottom_10_percent <- bottom_10_percent %>%
+  select(-Demo_Pop, -Total_Pop) %>%
+  pivot_wider(names_from = Race, values_from = Percentage) %>%
+  mutate(Asian = sprintf("%.2f", Asian)) %>%
+  mutate(across(-1, ~sprintf("%.2f", .)))
+
+# Generate a styled table for the top 5 clusters with kable and kableExtra
+top_10_kable <- kable(top_10_percent, format = table_format, caption = "Demographic Breakdown of Property Crime Perpetrators in top 10 neighborhood", longtable = TRUE) %>%
+  kable_styling(font_size = 7, bootstrap_options = "striped", full_width = FALSE, latex_options = "HOLD_position") %>%
+  column_spec(1, bold = TRUE, width = "2cm") %>%
+  column_spec(2, width = "1.5cm") %>%
+  collapse_rows(columns = 1, valign = "top")
+
+# Generate a styled table for the bottom 5 clusters, similar to the top 10 table
+bottom_10_kable <- kable(bottom_10_percent, format = table_format, caption = "Demographic Breakdown of Property Crime Perpetrators in bottom 10 neighborhood", longtable = TRUE) %>%
+  kable_styling(font_size = 7, bootstrap_options = "striped", full_width = FALSE, latex_options = "HOLD_position") %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, bold = TRUE, width = "2cm") %>%
+  column_spec(2, width = "2cm") %>%
+  collapse_rows(columns = 1, valign = "top")
+
+# Render both tables in the output
+top_10_kable
+bottom_10_kable
+
+
+```
+
+
+The top 10 clusters with high property crime rates do not exhibit a consistent majority demographic, with clusters like 40 and 35 having a higher Black demographic, while cluster 25 has a predominantly White demographic. Comparing this to violent crime rates, where a higher Black demographic was more prevalent across high-rate clusters, the property crime data shows greater demographic diversity. 
+
+In the bottom 10 clusters for property crime, the White demographic is more dominant, (non-dominant in cluster 29, 38) a pattern that aligns with the violent crime data. These variances underscore that while certain demographics may appear more frequently in areas with higher crime rates, the relationship is complex and not uniformly applicable across different types of crime.
+
+
+## Conclusion
+
+In summary, my comprehensive analysis of crime and transit patterns in Washington D.C. unveils a nuanced relationship between metro bus stop proximity and crime rates. Choropleth maps and Leaflet visualizations depict higher crime rates in central clusters, particularly around Howard University, with a significant correlation between crime prevalence and metro bus stop density in select areas. Arson followed by sex abuse emerges as having the strongest relationship among various crime types around metro bus stops, emphasizing the importance of considering crime categories individually. All of the crimes (robbery, sex abuse, assault) showed moderate positive correlation with the transport rate. Furthermore, The examination of property and violent crime rates in  D.C. shows nuanced patterns: while higher Black demographics are prevalent in the top 10 high-crime clusters, this trend does not uniformly apply, as seen in clusters like 35. Conversely, the bottom 10 clusters, with lower property crime rates, generally exhibit higher White demographics, mirroring trends seen in violent crime analysis. These findings highlight the complexity of urban crime dynamics, where demographic factors are significant but not the sole determinants.
+
+
+
+
+
+
+
